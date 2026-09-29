@@ -1,6 +1,8 @@
 # Lecture Recording → Lecture Notes
 
-A [Claude skill](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview) that turns a recorded lecture — a Zoom `.vtt` transcript plus, optionally, the `.mp4` video, the slide deck, and supplementary readings — into polished, tutorial-style Markdown lecture notes with embedded slides, auto-extracted demo screenshots, attributed speaker quotes, and a Q&A section.
+A [Claude skill](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview) that turns a recorded lecture (a Zoom `.vtt` transcript and the `.mp4` video) into polished, tutorial-style Markdown lecture notes illustrated with screen grabs taken straight from the recording, with attributed speaker quotes and a Q&A section.
+
+All you need is the recording. The skill finds every distinct screen the speaker showed, grabs the moments the speaker points at, and paints the speaker's camera thumbnail out of each image.
 
 It is built for instructors, TAs, and students who want readable notes from a class, workshop, or talk without hand-transcribing it or watching the recording again.
 
@@ -30,10 +32,8 @@ Given a session folder like this:
 
 ```
 03-how-llms-actually-work/
-├── 03-how-llms-actually-work.vtt     # Zoom transcript (required)
-├── recording.mp4                     # optional
-├── slides.pdf                        # optional (.pdf or .pptx)
-└── reading.md                        # optional supplementary material
+├── 03-how-llms-actually-work.vtt     # Zoom transcript
+└── GMT20260915-175554_Recording_1920x1080.mp4   # Zoom video
 ```
 
 the skill writes, into the same folder:
@@ -41,21 +41,19 @@ the skill writes, into the same folder:
 ```
 03-how-llms-actually-work/
 ├── 03-how-llms-actually-work-lecture-notes.md   # the notes
-├── slides/
-│   ├── slide-001.png
-│   └── ...
 └── screenshots/
-    ├── auto_004523.png                           # frames pulled from demo moments
+    ├── auto_000512.png                           # screen grabs, named by video time
+    ├── auto_004523.png
     └── ...
 ```
 
 The notes contain:
 
-- **YAML frontmatter** — title, date, presenter, duration, source transcript
+- **YAML frontmatter:** title, date, presenter, duration, source transcript and video
 - **Key concepts and learning objectives** up front
 - **Sectioned, tutorial-style prose** rewritten from the transcript (not a raw dump), following the lecture's logical flow
-- **Slide images** placed at the start of the section they belong to
-- **Demo walkthroughs** with screenshots captured from the video at the moments the speaker was showing something
+- **Screen grabs** placed where each topic starts and inline at demos, with the camera thumbnail removed
+- **Demo walkthroughs** describing what happened on screen
 - **Blockquoted speaker quotes** with attribution
 - **Q&A** with questions and paraphrased answers
 - **Summary** of takeaways and a **References** list of resources mentioned in the lecture
@@ -64,16 +62,27 @@ The notes contain:
 
 ## How it works
 
-The skill guides Claude through four phases.
+The skill guides Claude through four phases and runs straight through without stopping for confirmation.
 
 | Phase | What happens |
 |---|---|
-| **0. Discovery** | Scans the working directory, classifies transcript / video / slides / supplementary files / existing screenshots, checks for Python dependencies, and shows you an inventory. **It waits for your confirmation before continuing.** |
-| **1. Slide conversion** | Renders PDF slides to `slides/slide-NNN.png` with PyMuPDF. PPTX decks are converted to PDF through LibreOffice when available; otherwise their text is extracted for alignment and the video supplies the visuals. |
-| **2. Transcript analysis & screenshots** | Parses the VTT into timed, speaker-attributed entries, then finds "visual moments" three ways: trigger phrases ("let me show you", "in the terminal", "as you can see"…), silent gaps longer than 3 seconds, and slide-transition language. Frames are pulled from the video 2 seconds after each moment, deduplicated, and compared against the aligned slide so each moment gets **one** image — the slide if it's just the slide, the screenshot if it's a live demo. |
-| **3. Note generation** | Writes the Markdown document following the structure and style rules below, using only content from the transcript, slides, and supplied materials. |
+| **0. Find the recording** | Locates the `.vtt` transcript and the `.mp4` video. When Zoom produced several videos, it prefers the shared-screen-only file (no camera), then shared screen with speaker view. |
+| **1. Remove the camera thumbnail** | Detects the camera box Zoom overlays on the shared screen, usually in the top-right, even when the camera is off and only the name tile shows. Claude confirms the detection on an annotated check frame, then that box is painted out of every grab with the surrounding background color. |
+| **2. Screen grabs** | One pass over the video saves a frame each time the screen settles on something new (slide advances, new windows, command output). Then it grabs extra frames where the transcript shows the speaker pointing at something ("as you can see", "in the terminal", silent pauses). Near-duplicates are skipped automatically. Claude reviews the rest, dropping transitional frames and anything private (inboxes, notifications, sign-in codes, student rosters or photos). |
+| **3. Note generation** | Writes the Markdown document following the structure and style rules below, using only what's in the transcript and on screen. |
 
-After the first draft, Claude offers to refine sections, add screenshots, or change the level of detail.
+After the first draft, Claude offers to refine sections, add or swap screen grabs, or change the level of detail.
+
+### How the camera thumbnail is found
+
+Screen content changes throughout a lecture, but the thumbnail's border stays in exactly the same place. The detector samples 60 frames across the video and looks for a rectangle anchored in a frame corner:
+
+- Both of its inner edges must show up in nearly every sampled frame.
+- Boundary stretches that are black against black carry no evidence either way (for example, a dark camera image next to a letterbox bar), so they are ignored instead of counted as missing edge.
+- The content inside or around the box must change over the lecture, which rules out static page layout.
+- If a static object inside the camera view (a projector screen, a door frame) forms a smaller rectangle nested in the same corner, the largest rectangle wins.
+
+On a dozen real Zoom recordings it found the thumbnail every time, including camera-off name tiles and an empty-room camera, with no false positives on screen recordings that have no thumbnail. It takes about 3 seconds per recording.
 
 ---
 
@@ -81,12 +90,13 @@ After the first draft, Claude offers to refine sections, add screenshots, or cha
 
 ```
 lecture-recording-to-lecture-notes/
-├── SKILL.md                  # The skill: workflow, output template, style rules
-├── README.md                 # This file
+├── SKILL.md                       # The skill: workflow, output template, style rules
+├── README.md                      # This file
 └── scripts/
-    ├── pdf_to_slides.py      # PDF → slide-NNN.png (PyMuPDF)
-    ├── extract_frames.py     # video + timestamps → auto_HHMMSS.png (OpenCV)
-    └── pptx_to_text.py       # PPTX → per-slide text JSON (python-pptx)
+    ├── detect_camera_overlay.py   # find the camera thumbnail → --mask value + check image
+    ├── detect_screen_changes.py   # one pass over the video → a frame per distinct screen
+    ├── extract_frames.py          # frames at given timestamps (masked, de-duplicated)
+    └── video_utils.py             # shared helpers: masking, frame comparison
 ```
 
 `SKILL.md` is the file Claude reads. Its frontmatter `name` and `description` determine when the skill is triggered.
@@ -127,46 +137,31 @@ git -C ~/.claude/skills/lecture-recording-to-lecture-notes pull
 
 ## Requirements
 
-- **Python 3.9+**
-- Python packages (each helper script installs its own dependency with `pip` on first run if it's missing):
-
-| Package | Needed for | Import check |
-|---|---|---|
-| `pymupdf` | PDF slides → PNG | `python3 -c "import fitz"` |
-| `opencv-python` | Screenshots from video | `python3 -c "import cv2"` |
-| `python-pptx` | Text from PPTX slides | `python3 -c "import pptx"` |
-
-To install them all up front:
+- **Python 3.10+**
+- **`opencv-python`** (brings `numpy` with it). The scripts install it with `pip` on first run if it's missing, or install it up front:
 
 ```bash
-pip install pymupdf opencv-python python-pptx
+pip install opencv-python
 ```
 
-**Optional system tools** (used only as fallbacks or for better PPTX rendering):
-
-- **LibreOffice** (`libreoffice` / `soffice`) — renders PPTX decks as real slide images
-- **ffmpeg** — fallback frame extraction if OpenCV is unavailable
-- **poppler** (`pdftoppm`) or **ImageMagick** (`convert`) — fallback PDF rendering if PyMuPDF is unavailable
-
-Only the `.vtt` transcript is strictly required; the video, slides, and extra materials each add to the result.
+Nothing else is needed: no system tools, no presentation software.
 
 ---
 
 ## Usage
 
-1. Put the lecture's files in one folder (one folder per session works best).
+1. Put the lecture's `.vtt` and `.mp4` in one folder (one folder per session works best).
 2. Open Claude Code in that folder, or attach the files in Claude.
 3. Ask for notes in plain language, for example:
 
    > Make lecture notes from this recording.
 
-   > Turn week 3's Zoom transcript and slides into study notes.
+   > Turn week 3's Zoom recording into study notes.
 
    > Write up this talk as tutorial-style notes with screenshots from the demos.
 
-4. Review the file inventory Claude presents and confirm (or correct) it.
-5. Claude converts slides, extracts screenshots, and writes `<session-name>-lecture-notes.md`.
-6. Ask for revisions: more detail on a section, more or fewer screenshots, a different Q&A placement, and so on.
+4. Claude reports what it found and carries on: it removes the camera thumbnail, captures the screens, and writes `<session-name>-lecture-notes.md`.
+5. Ask for revisions: more detail on a section, a different screenshot, a different Q&A placement, and so on.
 
 ---
 
@@ -175,21 +170,20 @@ Only the `.vtt` transcript is strictly required; the video, slides, and extra ma
 | Type | Extensions | Required? | Role |
 |---|---|---|---|
 | Transcript | `.vtt` | **Yes** | WebVTT from Zoom (speaker-labelled lines like `Name: text` work best) |
-| Video | `.mp4` | No | Source for auto-extracted demo screenshots |
-| Slides | `.pdf`, `.pptx` | No | Rendered and embedded; also used to verify presenter names |
-| Supplementary | `.md`, `.txt`, `.docx`, papers | No | Extra context; explicit learning objectives here are used as-is |
-| Manual screenshots | images in `screenshots/` | No | Kept and interleaved chronologically with auto-extracted ones |
+| Video | `.mp4` | **Yes, for images** | Source of every screen grab. Without it, the notes are text only. |
+| Existing screen grabs | images in `screenshots/` | No | Kept and interleaved chronologically with new ones |
+| Your own readings or notes | any | No | Used as extra context when you hand them to Claude |
 
-**Getting a VTT from Zoom:** in the Zoom web portal, open **Recordings**, choose the cloud recording, and download the **Audio transcript** file (`.vtt`). Cloud recording with audio transcription must be enabled for the meeting.
+**Getting the files from Zoom:** in the Zoom web portal, open **Recordings**, choose the cloud recording, and download the video and the **Audio transcript** (`.vtt`). Cloud recording with audio transcription must be enabled for the meeting. If your account records **Shared screen** as a separate file, download that one: it has no camera thumbnail at all.
 
 ---
 
 ## Output
 
 - **Notes file:** `<session-name>-lecture-notes.md`, where the session name comes from the folder or VTT filename (e.g. `03-how-llms-actually-work.vtt` → `03-how-llms-actually-work-lecture-notes.md`).
-- **`slides/`:** `slide-001.png`, `slide-002.png`, … (200 DPI by default).
-- **`screenshots/`:** `auto_HHMMSS.png`, named by the video timestamp of the frame (e.g. `auto_004523.png` = 00:45:23).
+- **`screenshots/`:** `auto_HHMMSS.png`, named by the video time of the frame (e.g. `auto_004523.png` = 00:45:23), full resolution, camera thumbnail removed.
 - All image links in the Markdown are relative, so the folder can be moved, committed to Git, or rendered on GitHub as-is.
+- No working files are left behind.
 
 Skeleton of the generated document:
 
@@ -200,6 +194,7 @@ date: "2026-09-15"
 presenter: "Jane Doe"
 duration: "1:14:32"
 source_transcript: "03-how-llms-actually-work.vtt"
+source_video: "GMT20260915-175554_Recording_1920x1080.mp4"
 ---
 
 # How LLMs Actually Work
@@ -211,13 +206,13 @@ source_transcript: "03-how-llms-actually-work.vtt"
 ---
 
 ## Tokenization
-![Slide: Tokenization](slides/slide-004.png)
+![Diagram of text split into tokens](screenshots/auto_000512.png)
 Tutorial-style explanation...
 
 > "A quote that captures the key idea." — Jane Doe
 
 ### Demo: Counting tokens in the playground
-![Screenshot](screenshots/auto_004523.png)
+![Token counter showing 42 tokens](screenshots/auto_004523.png)
 Step-by-step walkthrough...
 
 ---
@@ -239,54 +234,63 @@ Step-by-step walkthrough...
 
 The scripts can also be run on their own.
 
-### `scripts/pdf_to_slides.py`
+### `scripts/detect_camera_overlay.py`
 
 ```bash
-python3 scripts/pdf_to_slides.py slides.pdf slides/ [--dpi 200]
+python3 scripts/detect_camera_overlay.py recording.mp4 [--check-image overlay_check.png]
 ```
 
-Renders every page of a PDF to `slides/slide-NNN.png`.
+Prints JSON with `found`, `corner`, `box` (`[x, y, w, h]` in pixels), `mask_arg` (the same box as `x,y,w,h`, ready for `--mask`), and `score`. It also writes a check image: a frame with the box outlined in red over a labelled 10% grid, so you can confirm the result or read off a corrected box.
+
+### `scripts/detect_screen_changes.py`
+
+```bash
+python3 scripts/detect_screen_changes.py recording.mp4 --mask 1592,0,328,188 --extract screenshots/ [-o screens.json]
+```
+
+Scans the video once, one frame per second, and records a capture each time the screen holds still for 2 seconds on content that differs from the previous capture. With `--extract`, it saves each capture as `auto_HHMMSS.png`. It processes a 2-hour recording in about 30 seconds.
+
+| Option | Default | Effect |
+|---|---|---|
+| `--mask x,y,w,h` | none | Box to paint out (from `detect_camera_overlay.py`) |
+| `--fill auto\|gray\|black\|none` | `auto` | `auto` matches the surrounding background color |
+| `--min-change` | `0.03` | Fraction of pixels that must differ from the last capture |
+| `--settle` | `2.0` | Seconds the screen must hold still before it's captured |
+| `--min-gap` | `5.0` | Minimum seconds between captures |
+| `--step` | `1.0` | Seconds between sampled frames |
 
 ### `scripts/extract_frames.py`
 
 ```bash
-python3 scripts/extract_frames.py recording.mp4 screenshots/ '[2700, 2850, 3000]' [--offset 2.0]
+python3 scripts/extract_frames.py recording.mp4 screenshots/ '[2700, 2850, 3000]' --mask 1592,0,328,188 [--offset 2.0]
 ```
 
-Takes a JSON array of timestamps in seconds and saves one frame per timestamp, `--offset` seconds later (default 2 s, which lets the screen settle), as `screenshots/auto_HHMMSS.png`.
-
-### `scripts/pptx_to_text.py`
-
-```bash
-python3 scripts/pptx_to_text.py presentation.pptx -o slides_text.json
-```
-
-Writes a JSON list of `{ "slide_number": N, "texts": [...] }`, used to align slides with the transcript when the deck can't be rendered to images. Without `-o`, it prints to stdout.
+Takes a JSON array of timestamps in seconds and saves one frame per timestamp, `--offset` seconds later (default 2 s, which lets the screen settle). It accepts the same `--mask` and `--fill` options. It skips frames nearly identical to an image already in the output folder; pass `--keep-duplicates` to save them anyway.
 
 ---
 
 ## Style rules the notes follow
 
-1. **Preamble first** — key terms and learning objectives before the body.
-2. **Tutorial-style prose** — rewritten for clarity, filler removed, speaker's logical flow preserved.
+1. **Preamble first:** key terms and learning objectives before the body.
+2. **Tutorial-style prose:** rewritten for clarity, filler removed, speaker's logical flow preserved.
 3. **Speaker quotes as blockquotes** with attribution.
-4. **Sections at natural topic transitions** — slide changes, "moving on" phrases, topic shifts.
+4. **Sections at natural topic transitions:** screen changes, "moving on" phrases, topic shifts.
 5. **Q&A** grouped at the end or inline, depending on how the lecture flowed.
-6. **One image per moment** — slides at section starts, screenshots inline at demos, never both for the same moment.
+6. **One image per moment**, with alt text describing what the screen shows.
 7. **Relative image paths.**
-8. **YAML frontmatter** with title, date, presenter, duration, and source transcript.
-9. **No invented content** — no examples, references, or quotes that aren't in the transcript, slides, or supplied materials.
+8. **YAML frontmatter** with title, date, presenter, duration, source transcript, and source video.
+9. **No invented content:** no examples, references, or quotes that aren't in the transcript, on screen, or in materials you supplied.
 
 ---
 
 ## Tips and limitations
 
+- **Use a shared-screen recording.** Screen grabs need the screen share in the video. A speaker-view or gallery-view recording has no screen content to capture.
 - **Long lectures:** transcripts over ~50,000 tokens are processed in time-range chunks (e.g. 15 minutes) and stitched together.
-- **Speaker names:** Zoom often mislabels speakers. The skill checks names against the title slide and prefers the slide when they conflict. If the VTT has no speaker labels, Claude will ask who is speaking.
-- **PPTX without LibreOffice:** only slide *text* can be extracted, so visuals come from video screenshots instead. Exporting the deck to PDF first gives the best results.
-- **Screenshot quality** depends on the recording's resolution and on what was shared. Gallery-view recordings won't capture screen shares well; use the "shared screen" recording layout when possible.
+- **Speaker names:** Zoom often mislabels speakers. The skill checks names against the title screen and the name label on the camera thumbnail. If the VTT has no speaker labels, Claude will ask who is speaking.
+- **Typing-heavy demos** produce many small screen changes. The default thresholds keep one capture per settled screen; raise `--min-change` if you still get too many.
 - **Accuracy:** the notes are only as accurate as the transcript. Review technical terms, names, and quotes before distributing the notes.
-- **Privacy:** recordings and transcripts can include student names and voices. Follow your institution's policies (e.g. FERPA) before sharing notes that name participants from Q&A.
+- **Privacy:** recordings can show student names, photos, seating charts, email, and notifications. The skill is told to drop or crop those frames, but review the screenshots before sharing, and follow your institution's policies (e.g. FERPA) before sharing notes that name participants from Q&A.
 
 ---
 
@@ -294,10 +298,13 @@ Writes a JSON list of `{ "slide_number": N, "texts": [...] }`, used to align sli
 
 | Symptom | Fix |
 |---|---|
-| `pip install` fails inside a script | Install manually into the Python you're using: `python3 -m pip install pymupdf opencv-python python-pptx`. On system Pythons with PEP 668 protection, use a virtual environment. |
-| `Error: Could not open video` | Check the path, and that the file is a complete download (Zoom sometimes delivers a partial file while processing). Try the ffmpeg fallback. |
-| Screenshots are black or show the wrong thing | Adjust `--offset`, or ask Claude to re-extract specific timestamps. |
-| Slides render blank or with missing fonts from PPTX | Export to PDF from PowerPoint/Keynote and use the PDF instead. |
+| `pip install` fails inside a script | Install manually into the Python you're using: `python3 -m pip install opencv-python`. On system Pythons with PEP 668 protection, use a virtual environment. |
+| `Error: Could not open video` | Check the path, and that the file is a complete download (Zoom sometimes delivers a partial file while processing). |
+| The camera thumbnail still shows in grabs | Open the check image, read the thumbnail's edges off the grid, and pass `--mask x,y,w,h` yourself (pad ~8 px). |
+| A gray or colored block looks out of place | Try `--fill auto` (matches the background) or `--fill gray`. |
+| Too many near-identical screenshots | Raise `--min-change` or `--min-gap` in `detect_screen_changes.py`. |
+| A screen the speaker showed was missed | Lower `--min-change`, or ask Claude to grab that moment by time. |
+| Screenshots caught mid-scroll or mid-animation | Raise `--settle`, or adjust `--offset` in `extract_frames.py`. |
 | Wrong presenter name in the notes | Tell Claude the correct name; it will update attributions throughout. |
 
 ---

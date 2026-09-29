@@ -1,101 +1,80 @@
 ---
 name: lecture-recording-to-lecture-notes
-description: Convert lecture recordings (.vtt transcripts, optional .mp4 video and slides) into polished Markdown lecture notes with auto-extracted screenshots, embedded slides, speaker quotes, and Q&A sections. Use for any lecture, class, or talk recording.
+description: Convert a lecture recording (Zoom .vtt transcript and .mp4 video) into polished Markdown lecture notes illustrated with screen grabs taken straight from the video, with the speaker's camera thumbnail removed, plus speaker quotes and Q&A. Use for any lecture, class, or talk recording.
 ---
 
 # Lecture Recording to Lecture Notes
 
-Transform lecture recordings into polished, tutorial-style Markdown notes. Given a transcript (and optionally video, slides, and supplementary materials), produce a complete Markdown document with embedded images — including auto-extracted screenshots from demo moments in the video.
+Transform a lecture recording into polished, tutorial-style Markdown notes. The transcript supplies the words; the video recording of the shared screen supplies every image. Screen grabs are taken automatically wherever the screen changes or the speaker points at something, with the speaker's camera thumbnail painted out.
+
+The video is the only visual source. Do not look for, ask for, or wait for any other presentation files.
 
 ## Workflow
 
-Execute these four phases in order. After Phase 0, confirm the inventory with the user before proceeding.
+Run these phases in order without pausing for confirmation, unless the transcript or video is missing.
 
 ---
 
-### Phase 0: Discovery & Prerequisites
+### Phase 0: Find the recording
 
-**Scan the working directory** and classify all relevant files:
+**Scan the working directory** for:
 
 | Type | Extensions | Role |
 |------|-----------|------|
-| Transcript | `.vtt` | Required — WebVTT from Zoom |
-| Video | `.mp4` | Optional — needed for auto-screenshots |
-| Slides | `.pptx`, `.pdf` | Optional — embedded in notes |
-| Supplementary | `.md`, `.txt`, `.docx`, papers | Optional — extra context |
-| Manual screenshots | Images in `screenshots/` | Optional — included alongside auto-extracted |
+| Transcript | `.vtt` | Required: WebVTT from Zoom |
+| Video | `.mp4` | Required for images: the source of every screen grab |
+| Existing screen grabs | images in `screenshots/` | Optional: kept and interleaved with new ones |
 
-**Check for required tools and Python packages:**
+If the user supplies readings or notes of their own, use them as extra context, but don't search the directory for anything beyond the files above.
 
-- `pymupdf` Python package — needed for PDF slide conversion. Check with `python3 -c "import fitz"`. Install with `pip install pymupdf` if missing.
-- `opencv-python` Python package — needed for screenshot extraction from video. Check with `python3 -c "import cv2"`. Install with `pip install opencv-python` if missing.
-- `python-pptx` Python package — needed for PPTX slide text extraction. Check with `python3 -c "import pptx"`. Install with `pip install python-pptx` if missing. Only needed if PPTX files are present.
+**Choosing the video when Zoom produced several.** Zoom cloud recordings can include several `.mp4` files for the same meeting. Prefer, in order:
+1. **Shared screen only** (no camera): no thumbnail to remove.
+2. **Shared screen with speaker view** or **with gallery view**: the usual file; the thumbnail is removed in Phase 1.
+3. **Active speaker** or **gallery view** only: shows no screen content; use only if nothing else exists.
 
-**Install missing Python packages** with pip. All core functionality uses Python packages to avoid system dependency issues.
+A single file named like `GMT20260922-193423_Recording_1920x1080.mp4` is the normal case.
 
-**Present inventory to the user:**
+**Check the one dependency:** `python3 -c "import cv2"`. The scripts install `opencv-python` automatically if it's missing.
+
+**Report the inventory briefly and continue immediately:**
 ```
-## Discovered Files
+## Recording
 - Transcript: [filename.vtt]
-- Video: [filename.mp4] (or "not found")
-- Slides: [filename.pptx] (or "not found")
-- Supplementary: [list or "none"]
-- Manual screenshots: [count] images in screenshots/ (or "none")
-
-## Tool Availability
-- pymupdf (Python): [available/installed/missing]
-- opencv-python (Python): [available/installed/missing — needed for video screenshots]
-- python-pptx (Python): [available/installed/missing — only needed for PPTX slides]
+- Video: [filename.mp4] ([duration], [width]x[height])
+- Existing screen grabs: [count] in screenshots/ (or "none")
 ```
 
-**Wait for user confirmation before proceeding.**
-
-If the transcript `.vtt` file is not found, stop and ask the user to provide one.
+If there is no `.vtt`, stop and ask for one. If there is no `.mp4`, ask for the video recording; if the user can't provide it, write text-only notes and say so at the top.
 
 ---
 
-### Phase 1: Slide Deck Conversion
+### Phase 1: Remove the camera thumbnail
 
-Skip this phase if no slide deck is found.
-
-**Goal:** Convert slides into individual PNG images at `slides/slide-NNN.png`.
-
-**For PDF slides (preferred — Python-based, no external tools needed):**
-
-Use the bundled script (auto-installs `pymupdf` if missing):
+Zoom overlays the speaker's camera, or a name tile when the camera is off, in a corner of shared-screen recordings, usually the top-right. Paint it out of every screen grab.
 
 ```bash
-python3 <skill-path>/scripts/pdf_to_slides.py "slides.pdf" slides/
+python3 <skill-path>/scripts/detect_camera_overlay.py "recording.mp4" --check-image overlay_check.png
 ```
 
-**For PPTX slides:**
-
-First check if `libreoffice` is available (`which libreoffice` or `which soffice`). If so, convert to PDF then to PNGs for high-quality slide images:
-
-```bash
-libreoffice --headless --convert-to pdf presentation.pptx --outdir .
-```
-Then use the pymupdf PDF-to-PNG conversion above on the resulting PDF.
-
-If `libreoffice` is not available, use the bundled script to extract structured text from each slide for transcript alignment (auto-installs `python-pptx` if missing):
-
-```bash
-python3 <skill-path>/scripts/pptx_to_text.py "presentation.pptx" -o slides_text.json
+It prints JSON such as:
+```json
+{"found": true, "corner": "top-right", "box": [1592, 0, 328, 188], "mask_arg": "1592,0,328,188", "score": 0.99, ...}
 ```
 
-Since `python-pptx` cannot render slides as images, rely on video screenshots to provide visuals for PPTX-based sessions when LibreOffice is unavailable.
+**Always look at `overlay_check.png`.** It shows a frame with the detected box outlined in red over a 10% grid labelled in pixels.
+- The red box covers the whole thumbnail, including the name label: use `mask_arg` as `--mask` in Phase 2.
+- `found` is false, or the box is wrong, but a thumbnail is visible: read its edges off the grid labels and build the mask yourself as `x,y,w,h` in pixels. Pad by ~8 px so the border is covered.
+- There's no thumbnail (screen-only recording): use no mask.
 
-**Fallback chain for PDF slides** if `pymupdf` is unavailable:
-1. `pdftoppm` (from poppler): `pdftoppm -png -r 200 slides.pdf slides/slide` then rename to zero-padded format
-2. ImageMagick `convert`: `convert -density 200 slides.pdf slides/slide-%03d.png`
+`--fill auto` (the default) paints the box with the surrounding background color so it disappears into the page. `--fill gray` paints a neutral gray box instead.
 
-After conversion, report the number of slides extracted.
+Delete `overlay_check.png` once the mask is settled; it isn't part of the output.
 
 ---
 
-### Phase 2: Transcript Analysis & Screenshot Extraction
+### Phase 2: Transcript analysis & screen grabs
 
-#### 2a. Parse the VTT Transcript
+#### 2a. Parse the VTT transcript
 
 Read the `.vtt` file and parse it into structured entries:
 ```
@@ -110,74 +89,62 @@ VTT format rules:
 
 Merge consecutive entries from the same speaker into coherent paragraphs for analysis.
 
-#### 2b. Detect Demo/Screen Moments
+#### 2b. Capture every distinct screen
 
-Identify timestamps where visual content is important using three methods:
+Scan the whole video once and save a frame each time the screen settles on something new:
 
-**Method 1 — Regex triggers.** Flag entries containing phrases like:
+```bash
+python3 <skill-path>/scripts/detect_screen_changes.py "recording.mp4" --mask 1592,0,328,188 --extract screenshots/ -o screens.json
+```
+
+This takes well under a minute per hour of video. Frames are saved as `screenshots/auto_HHMMSS.png`, and `screens.json` lists each capture's time. Tuning, if needed:
+- Too many near-identical captures (e.g. lots of typing): raise `--min-change` (default `0.03`) or `--min-gap` (default `5` s).
+- Missed changes: lower `--min-change`.
+- Captures taken mid-animation or mid-scroll: raise `--settle` (default `2` s).
+
+#### 2c. Grab the moments the speaker points at
+
+Screen-change detection misses moments where the speaker talks about something already on screen. Find those in the transcript:
+
+**Trigger phrases.** Flag entries containing phrases like:
 - "let me show you", "as you can see", "if you look at", "on the screen"
 - "I'm clicking", "let me click", "I'll type", "in the terminal", "in the browser"
 - "let me share my screen", "let me demonstrate", "here's an example"
 - "let me pull up", "switching to", "opening up", "running this"
-- "the output shows", "you'll see", "notice that", "look at this"
+- "the output shows", "you'll see", "notice that", "look at this", "next slide"
 
-**Method 2 — Gap detection.** Flag gaps where `start_time(entry N+1) - end_time(entry N) > 3 seconds`. Silent pauses often indicate visual activity (typing, navigating, waiting for output).
+**Silent gaps.** Flag gaps where `start_time(entry N+1) - end_time(entry N) > 3 seconds`. Silence often means typing, navigating, or waiting for output.
 
-**Method 3 — Slide transitions.** Flag phrases indicating slide changes:
-- "next slide", "moving on", "let's move to", "the next topic"
-- Significant topic shifts detected by comparing adjacent entry content
-
-Collect all flagged timestamps into a deduplicated list.
-
-#### 2c. Extract Frames from Video
-
-Skip if no `.mp4` video is found.
-
-For each detected timestamp, extract a frame with a 2-second offset (to let the screen settle).
-
-**Preferred method — Python with opencv-python (no system dependencies):**
-
-Use the bundled script (auto-installs `opencv-python` if missing). Pass timestamps as a JSON array of seconds:
+Deduplicate the flagged timestamps (merge any within 5 seconds, keeping the later one) and extract them with the same mask:
 
 ```bash
-python3 <skill-path>/scripts/extract_frames.py "recording.mp4" screenshots/ '[2700, 2850, 3000]'
+python3 <skill-path>/scripts/extract_frames.py "recording.mp4" screenshots/ '[2700, 2850, 3000]' --mask 1592,0,328,188
 ```
 
-**Fallback — ffmpeg (if opencv-python is unavailable):**
-```bash
-mkdir -p screenshots
-ffmpeg -ss <seconds + 2> -i recording.mp4 -frames:v 1 -q:v 2 screenshots/auto_<timestamp>.png
-```
+Each frame is taken 2 seconds after the timestamp (`--offset`) so the screen can settle. Frames nearly identical to one already in `screenshots/` are skipped automatically.
 
-Use the format `auto_HHMMSS.png` for filenames (e.g., `auto_004523.png` for 00:45:23).
+#### 2d. Review the screen grabs
 
-**Deduplication:**
-- Merge timestamps within 5 seconds of each other (keep the later one)
-- After extraction, use Claude's vision capability to compare adjacent screenshots and drop near-identical frames (e.g., same slide with no meaningful change)
+Look at the grabs with vision and keep only the ones worth showing:
+- **Drop near-duplicates:** keep the most complete version (e.g. the fully built-up screen, the finished command output).
+- **Drop transitional frames:** half-loaded pages, mid-scroll blur, open menus that aren't the point.
+- **Drop frames with no screen content:** a full-frame camera view, a blank desktop, the Zoom waiting screen.
+- **Drop anything private:** email inboxes, chat or notification pop-ups, passwords or QR codes for sign-in, and class rosters, seating charts, or student photos and names. If a frame is useful but has a private area, crop it rather than include it as-is.
+- **Check the thumbnail is gone:** if any frame still shows the camera box, fix the mask and re-extract.
 
-**Slide vs. screenshot selection:** When both a slide image and a video screenshot exist for the same moment, do not use both. The goal is one image per moment:
-- If the speaker is discussing content that is on a slide, use only the slide image (it will be higher quality than a video capture of the same slide)
-- If the video shows something other than the slides (e.g., a live demo, a browser, a terminal, a different application), use the screenshot
-- To decide efficiently: use the slide-to-transcript alignment from Phase 2e to find which single slide corresponds to each screenshot's timestamp. Compare the screenshot only against that one aligned slide — not against all slides. If they show the same content, keep only the slide and discard the screenshot
+Delete the rejected files so `screenshots/` holds only what the notes use, and delete `screens.json` once you've used it.
 
-#### 2d. Incorporate Manual Screenshots
+If `screenshots/` held images before this run, keep them and interleave them chronologically with the new grabs.
 
-If a `screenshots/` folder exists with pre-existing images, include them in the output. Sort manual screenshots by filename and interleave them with auto-extracted screenshots based on best-guess chronological order.
+#### 2e. Align screen grabs to the transcript
 
-#### 2e. Align Slides to Transcript
-
-If slides were extracted in Phase 1:
-1. For each slide image, use Claude's vision to read the slide title and key text
-2. Search the transcript for the segment that best matches each slide's content
-3. Record the mapping: `slide-NNN.png → transcript segment at timestamp T`
-
-This mapping is used in Phase 3 to place slides at the correct positions in the notes.
+Each grab's filename is its video time. Match it to the transcript passage being spoken at that time, and note what the screen shows (a title, a diagram, a terminal, a web page). Use this mapping to place images and to name sections in Phase 3.
 
 ---
 
-### Phase 3: Note Generation
+### Phase 3: Note generation
 
-All outputs (the Markdown file, `slides/`, and `screenshots/`) should be written into the session's subdirectory — the directory where the source materials (VTT, slides) are located. Name the Markdown file `[session-name]-lecture-notes.md`, deriving the session name from the subdirectory name or the VTT filename (e.g., if the VTT is `03-how-llms-actually-work.vtt`, the output is `03-how-llms-actually-work-lecture-notes.md`).
+Write all outputs (the Markdown file and `screenshots/`) into the session's directory, where the `.vtt` and `.mp4` are. Name the Markdown file `[session-name]-lecture-notes.md`, deriving the session name from the directory name or the VTT filename (e.g., `03-how-llms-actually-work.vtt` becomes `03-how-llms-actually-work-lecture-notes.md`).
 
 The Markdown file should have this structure:
 
@@ -188,6 +155,7 @@ date: "[Date of recording]"
 presenter: "[Speaker Name(s)]"
 duration: "[Total duration from transcript timestamps]"
 source_transcript: "[filename.vtt]"
+source_video: "[filename.mp4]"
 ---
 
 # [Lecture Title]
@@ -208,7 +176,7 @@ source_transcript: "[filename.vtt]"
 
 ## [Section Title]
 
-![Slide: [slide title]](slides/slide-001.png)
+![What the screen shows](screenshots/auto_000512.png)
 
 Tutorial-style narrative prose that explains the content covered in this
 section. This is NOT a raw transcript — it is rewritten as clear, readable
@@ -255,23 +223,23 @@ produced, and what it means.
 
 #### Style Rules
 
-1. **Preamble first.** Start with key concepts, terms, and learning objectives before the body. Derive these from the transcript content and any supplementary materials. If supplementary materials include explicit objectives, use those.
+1. **Preamble first.** Start with key concepts, terms, and learning objectives before the body. Derive these from the transcript, what's on screen, and any readings the user supplied.
 
 2. **Tutorial-style prose.** Rewrite transcript content as clear instructional narrative. Do not dump raw transcript text. Preserve the speaker's logical flow but improve clarity, fix filler words, and add structure.
 
 3. **Speaker quotes as blockquotes.** When the speaker says something particularly insightful, memorable, or important, include it as a blockquote with attribution: `> "quote" — Name`.
 
-4. **Section boundaries.** Create new sections at natural topic transitions. Use slide transitions, explicit "moving on" phrases, and topic shifts as section boundary signals.
+4. **Section boundaries.** Create new sections at natural topic transitions. Use screen changes, explicit "moving on" phrases, and topic shifts as section boundary signals.
 
-5. **Q&A sections.** When audience members ask questions (detected by speaker changes and question phrasing), format them in the Q&A style. Group Q&A at the end or inline with the relevant section — use judgment based on how the lecture flowed.
+5. **Q&A sections.** When audience members ask questions (detected by speaker changes and question phrasing), format them in the Q&A style. Group Q&A at the end or inline with the relevant section; use judgment based on how the lecture flowed.
 
-6. **Image placement.** Place slide images at the start of their corresponding section. Place screenshots inline where the demo or visual moment occurred in the narrative. Never show both a slide and a screenshot for the same moment — if the video frame just shows the slide, use only the slide image.
+6. **Image placement.** Put the screen grab that introduces a topic at the start of its section, and demo grabs inline where the demo happens in the narrative. One image per moment. Give each image alt text that says what the screen shows.
 
-7. **Relative paths.** All image paths must be relative to the output Markdown file (e.g., `slides/slide-001.png`, `screenshots/auto_004523.png`).
+7. **Relative paths.** All image paths must be relative to the output Markdown file (e.g., `screenshots/auto_004523.png`).
 
-8. **Metadata frontmatter.** Include YAML frontmatter with title, date, presenter, duration, and source transcript filename.
+8. **Metadata frontmatter.** Include YAML frontmatter with title, date, presenter, duration, source transcript, and source video filenames.
 
-9. **No hallucinated content.** Only include information that appears in the transcript, slides, or supplementary materials. Do not invent examples, add external references not mentioned, or fabricate speaker quotes.
+9. **No hallucinated content.** Only include information that appears in the transcript, on screen in the video, or in readings the user supplied. Do not invent examples, add external references not mentioned, or fabricate speaker quotes.
 
 ---
 
@@ -279,6 +247,6 @@ produced, and what it means.
 
 - **Large transcripts**: For transcripts longer than ~50,000 tokens, process in chunks by time range (e.g., 15-minute segments) and stitch together at the end.
 - **Multiple speakers**: Track speaker names throughout and attribute quotes correctly. If the VTT doesn't include speaker names, ask the user to identify speakers.
-- **Speaker name verification**: VTT transcripts from Zoom often misidentify speakers. Cross-reference speaker names against slide deck title slides, which typically show the actual presenter name and affiliation. When there is a conflict, prefer the name from the slides over the VTT or the user's prompt.
-- **Output location**: Write all outputs (Markdown, slides/, screenshots/) into the session's subdirectory alongside the source materials. Name the file `[session-name]-lecture-notes.md`.
-- **Iterative refinement**: After generating the first draft, offer to refine specific sections, add more screenshots, or adjust the level of detail.
+- **Speaker name verification**: VTT transcripts from Zoom often misidentify speakers. Cross-reference names against what the video shows: the title screen at the start of the talk and the name label on the camera thumbnail (visible in `overlay_check.png`). When there is a conflict, prefer the on-screen name over the VTT or the user's prompt.
+- **Output location**: Write all outputs (Markdown and `screenshots/`) into the session's directory alongside the recording. Name the file `[session-name]-lecture-notes.md`. Leave no working files behind (`overlay_check.png`, `screens.json`).
+- **Iterative refinement**: After generating the first draft, offer to refine specific sections, add or swap screen grabs, or adjust the level of detail.
